@@ -4224,6 +4224,11 @@ _KITTY_KEYBOARD_PUSH_SEQ = "\x1b[>1u"
 _MODIFY_OTHER_KEYS_SEQ = "\x1b[>4;2m"
 _EXTENDED_ENTER_KEYS_SEQ = _KITTY_KEYBOARD_PUSH_SEQ + _MODIFY_OTHER_KEYS_SEQ
 
+# Track whether modifyOtherKeys / Kitty keyboard modes are currently pushed.
+# Bare builtin input() does not decode those escapes; _safe_input temporarily
+# resets the modes around every input() call while they are active (#97975).
+_extended_enter_keys_active = False
+_extended_enter_keys_output = None
 
 _BACKSLASH_LINE_CONTINUATION_RE = re.compile(r"\\[ \t]*$")
 
@@ -4310,20 +4315,62 @@ def _enable_extended_enter_keys(output=None, env: Optional[Mapping[str, str]] = 
         return False
     # Ghostty exception: only modifyOtherKeys — see _is_ghostty_terminal.
     seq = _MODIFY_OTHER_KEYS_SEQ if _is_ghostty_terminal(env) else _EXTENDED_ENTER_KEYS_SEQ
+    global _extended_enter_keys_active, _extended_enter_keys_output
     try:
         target = output
         if target is not None and hasattr(target, "write_raw"):
             target.write_raw(seq)
             target.flush()
+            _extended_enter_keys_active = True
+            _extended_enter_keys_output = target
             return True
         stream = sys.stdout
         if stream is not None and stream.isatty():
             stream.write(seq)
             stream.flush()
+            _extended_enter_keys_active = True
+            _extended_enter_keys_output = output
             return True
     except Exception:
         return False
     return False
+
+
+# Real builtin input(), captured before the module-level monkey-patch below.
+_BUILTIN_INPUT = input
+
+
+def _safe_input(prompt=""):
+    """Builtin input() wrapper that drops modifyOtherKeys while prompting.
+
+    ``_enable_extended_enter_keys`` pushes CSI >4;2m globally for the process.
+    prompt_toolkit decodes those escapes; bare ``input()`` does not, so shifted
+    characters arrive as raw ``ESC[27;…~`` sequences.  Reset the modes for the
+    duration of the builtin read, then re-enable afterward (#97975).
+    """
+    was_active = _extended_enter_keys_active
+    output = _extended_enter_keys_output
+    if was_active:
+        try:
+            if output is not None and hasattr(output, "write_raw"):
+                output.write_raw(_TERMINAL_INPUT_MODE_RESET_SEQ)
+                output.flush()
+            elif output is not None and hasattr(output, "write"):
+                output.write(_TERMINAL_INPUT_MODE_RESET_SEQ)
+                output.flush()
+            else:
+                sys.stdout.write(_TERMINAL_INPUT_MODE_RESET_SEQ)
+                sys.stdout.flush()
+        except Exception:
+            pass
+    try:
+        return _BUILTIN_INPUT(prompt)
+    finally:
+        if was_active:
+            try:
+                _enable_extended_enter_keys(output)
+            except Exception:
+                pass
 
 
 def _cli_multiline_shortcuts_enabled(config: Optional[Dict[str, Any]] = None) -> bool:
@@ -21040,6 +21087,13 @@ def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str) -> None:
         first_response=first_response or "",
         log=lambda m: logger.info("%s", m),
     )
+
+
+# Protect every bare input() in this process from modifyOtherKeys leakage
+# while extended enter-key modes are active (#97975).
+import builtins as _builtins
+
+_builtins.input = _safe_input
 
 
 def main(
