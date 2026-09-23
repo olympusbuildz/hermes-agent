@@ -200,15 +200,8 @@ def kanban_command(args: argparse.Namespace) -> int:
 
 def _profile_author() -> str:
     """Best-effort author name for an interactive CLI call."""
-    for env in ("HERMES_PROFILE_NAME", "HERMES_PROFILE"):
-        v = os.environ.get(env)
-        if v:
-            return v
-    try:
-        from hermes_cli.profiles import get_active_profile_name
-        return get_active_profile_name() or "user"
-    except Exception:
-        return "user"
+    from hermes_cli.profiles import current_profile_name
+    return current_profile_name("user") or "user"
 
 
 _DELEGATED_CHILD_DENIED_ACTIONS: frozenset[str] = frozenset({
@@ -1404,9 +1397,11 @@ def run_slash(rest: str) -> str:
                     return subparser.format_usage().rstrip()
         return kanban_parser.format_usage().rstrip()
 
+    from agent.thread_scoped_output import thread_scoped_capture
+
     buf_out, buf_err = io.StringIO(), io.StringIO()
     try:
-        with contextlib.redirect_stdout(buf_out), contextlib.redirect_stderr(buf_err):
+        with thread_scoped_capture(buf_out, buf_err):
             args = kanban_parser.parse_args(tokens)
     except SystemExit as exc:
         out, err = buf_out.getvalue().rstrip(), buf_err.getvalue().rstrip()
@@ -1417,7 +1412,7 @@ def run_slash(rest: str) -> str:
     except argparse.ArgumentError as exc:
         return f"⚠ /kanban usage error\n{_usage_for_error()}\n{exc}"
 
-    with contextlib.redirect_stdout(buf_out), contextlib.redirect_stderr(buf_err):
+    with thread_scoped_capture(buf_out, buf_err):
         try:
             kanban_command(args)
         except SystemExit:
